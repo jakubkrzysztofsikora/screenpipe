@@ -22,39 +22,62 @@ docker compose version >/dev/null 2>&1 || die "docker compose (v2 plugin) is req
 log "All prerequisites found"
 
 # ── 2. LUKS encrypted volume ────────────────────────────────────
-if [ -b /dev/sdb ]; then
-    if mount | grep -q ' /data '; then
-        log "LUKS volume already mounted at /data — skipping"
-    else
-        log "Setting up LUKS encrypted volume on /dev/sdb..."
-        if ! cryptsetup isLuks /dev/sdb 2>/dev/null; then
-            log "Formatting /dev/sdb with LUKS (you will be prompted for a passphrase)"
-            cryptsetup luksFormat /dev/sdb
-        fi
-        if [ ! -e /dev/mapper/screenpipe-data ]; then
-            log "Opening LUKS volume..."
-            cryptsetup open /dev/sdb screenpipe-data
-        fi
-        if ! blkid /dev/mapper/screenpipe-data | grep -q ext4; then
-            log "Creating ext4 filesystem..."
-            mkfs.ext4 /dev/mapper/screenpipe-data
-        fi
-        mkdir -p /data
-        mount /dev/mapper/screenpipe-data /data
-        log "LUKS volume mounted at /data"
+# This server stores sensitive screen capture data (OCR text, audio transcriptions).
+# Unencrypted storage is not acceptable — a block volume without LUKS is readable
+# by anyone who can attach it to another VM (e.g., via Scaleway console).
+if [ ! -b /dev/sdb ]; then
+    die "/dev/sdb not found. Attach a Scaleway block volume before running setup.
+Screenpipe stores sensitive screen capture data — LUKS encryption is required.
+Steps:
+  1. In the Scaleway console, create a block volume (≥ 30 GB) and attach to this instance.
+  2. Re-run this script."
+fi
 
-        # Persist in crypttab/fstab if not already present
-        if ! grep -q 'screenpipe-data' /etc/crypttab 2>/dev/null; then
-            echo "screenpipe-data /dev/sdb none luks" >> /etc/crypttab
-        fi
-        if ! grep -q '/dev/mapper/screenpipe-data' /etc/fstab 2>/dev/null; then
-            echo "/dev/mapper/screenpipe-data /data ext4 defaults 0 2" >> /etc/fstab
+if mount | grep -q ' /data '; then
+    log "LUKS volume already mounted at /data — skipping"
+else
+    KEYFILE="/root/.luks-screenpipe.key"
+    log "Setting up LUKS encrypted volume on /dev/sdb..."
+
+    if ! cryptsetup isLuks /dev/sdb 2>/dev/null; then
+        log "Formatting /dev/sdb with LUKS..."
+        # Generate a random keyfile stored on the root partition.
+        # Threat model: protects data if the block volume is detached/cloned.
+        # Root partition access = full access anyway, so keyfile-on-root is acceptable.
+        openssl rand -base64 64 > "$KEYFILE"
+        chmod 400 "$KEYFILE"
+        log "LUKS keyfile written to $KEYFILE (mode 400)"
+        cryptsetup luksFormat --batch-mode --key-file "$KEYFILE" /dev/sdb
+        log "LUKS formatted"
+    else
+        log "/dev/sdb is already LUKS formatted"
+        if [ ! -f "$KEYFILE" ]; then
+            die "LUKS keyfile not found at $KEYFILE but /dev/sdb is already LUKS formatted.
+Run: cryptsetup open /dev/sdb screenpipe-data and mount /dev/mapper/screenpipe-data /data manually."
         fi
     fi
-else
-    log "WARNING: /dev/sdb not found — skipping LUKS setup"
-    log "Use filesystem-level encryption (e.g., dm-crypt on existing partition) instead"
+
+    if [ ! -e /dev/mapper/screenpipe-data ]; then
+        log "Opening LUKS volume with keyfile..."
+        cryptsetup open --key-file "$KEYFILE" /dev/sdb screenpipe-data
+    fi
+
+    if ! blkid /dev/mapper/screenpipe-data | grep -q ext4; then
+        log "Creating ext4 filesystem..."
+        mkfs.ext4 /dev/mapper/screenpipe-data
+    fi
+
     mkdir -p /data
+    mount /dev/mapper/screenpipe-data /data
+    log "LUKS volume mounted at /data"
+
+    # Persist in crypttab (keyfile-based, auto-unlocks on boot) and fstab
+    if ! grep -q 'screenpipe-data' /etc/crypttab 2>/dev/null; then
+        echo "screenpipe-data /dev/sdb $KEYFILE luks" >> /etc/crypttab
+    fi
+    if ! grep -q '/dev/mapper/screenpipe-data' /etc/fstab 2>/dev/null; then
+        echo "/dev/mapper/screenpipe-data /data ext4 defaults 0 2" >> /etc/fstab
+    fi
 fi
 
 # ── 3. Create data directories ──────────────────────────────────

@@ -28,8 +28,6 @@ log = logging.getLogger("sync-server")
 # ── Config ───────────────────────────────────────────────────────
 DB_PATH = os.environ.get("DB_PATH", "/data/db.sqlite")
 SYNC_TOKEN = os.environ.get("SYNC_TOKEN", "")
-if not SYNC_TOKEN:
-    log.warning("SYNC_TOKEN not set — all authenticated endpoints will reject requests")
 
 # ── Constants ────────────────────────────────────────────────────
 ALLOWED_TABLES = frozenset({
@@ -67,6 +65,8 @@ TABLE_COLUMNS = {
 VERSION = "1.0.0"
 MAX_ROWS_PER_PUSH = 500
 MACHINE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+# Defence-in-depth: column names must be plain SQL identifiers before interpolation
+_SAFE_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 # ── Database ─────────────────────────────────────────────────────
 _db_lock = threading.Lock()
@@ -145,12 +145,15 @@ def _validate_iso8601(ts: str, field_name: str) -> str:
 
 
 def _sanitize_fts_query(q: str) -> str:
-    """Strip FTS5 special operators to prevent SQL errors."""
-    # Remove FTS5 special chars: * " ^ : { } ( ) + -
+    """Strip FTS5 operators and wrap in double-quotes for literal phrase search."""
+    # Remove FTS5 punctuation operators: * " ^ : { } ( ) + -
     sanitized = re.sub(r'[*"^:{}()+\-]', " ", q)
+    # Remove FTS5 keyword operators (AND, OR, NOT, NEAR) — alphabetic, not caught above
+    sanitized = re.sub(r"\b(AND|OR|NOT|NEAR)\b", " ", sanitized, flags=re.IGNORECASE)
     # Collapse whitespace
     sanitized = re.sub(r"\s+", " ", sanitized).strip()
-    return sanitized
+    # Wrap in double-quotes so FTS5 treats the entire string as a literal phrase
+    return f'"{sanitized}"'
 
 
 # ── Pydantic Models ──────────────────────────────────────────────
@@ -166,6 +169,9 @@ app = FastAPI(title="Screenpipe Private Sync Server", version=VERSION)
 
 @app.on_event("startup")
 def startup():
+    if not SYNC_TOKEN:
+        log.critical("SYNC_TOKEN is not set — refusing to start. Set it in the .env file.")
+        raise RuntimeError("SYNC_TOKEN is required")
     log.info("Starting sync server: db=%s version=%s", DB_PATH, VERSION)
     _init_db()
 
@@ -176,15 +182,11 @@ def startup():
 @app.get("/health")
 def health():
     try:
-        db = _read_db()
-        db.execute("SELECT 1")
-        return {"status": "ok", "db": DB_PATH, "version": VERSION}
+        _read_db().execute("SELECT 1")
+        return {"status": "ok", "version": VERSION}
     except Exception as e:
         log.error("Health check degraded: %s", e)
-        return JSONResponse(
-            status_code=200,
-            content={"status": "degraded", "error": str(e), "version": VERSION},
-        )
+        return JSONResponse(status_code=200, content={"status": "degraded"})
 
 
 @app.post("/sync/push")
@@ -206,7 +208,7 @@ def sync_push(req: PushRequest, x_sync_token: str | None = Header(None)):
     try:
         with _write_lock() as conn:
             for row in req.rows:
-                # Validate column names
+                # Validate column names against allowlist
                 row_cols = set(row.keys())
                 invalid_cols = row_cols - allowed_cols
                 if invalid_cols:
@@ -219,6 +221,12 @@ def sync_push(req: PushRequest, x_sync_token: str | None = Header(None)):
                 row["machine_id"] = req.machine_id
 
                 columns = list(row.keys())
+                # Defence-in-depth: verify every column name is a safe SQL identifier
+                # before string-interpolating into the INSERT statement
+                for col in columns:
+                    if not _SAFE_IDENT.match(col):
+                        raise HTTPException(status_code=400, detail=f"invalid column name: {col}")
+
                 placeholders = ", ".join("?" for _ in columns)
                 col_names = ", ".join(columns)
                 values = [row[c] for c in columns]
@@ -230,14 +238,14 @@ def sync_push(req: PushRequest, x_sync_token: str | None = Header(None)):
                 else:
                     skipped += 1
 
-            # Update sync_state
+            # Update sync_state (rows_stored = actually inserted, skips not counted)
             now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             conn.execute(
-                """INSERT INTO sync_state (machine_id, table_name, last_synced_at, rows_received, updated_at)
+                """INSERT INTO sync_state (machine_id, table_name, last_synced_at, rows_stored, updated_at)
                    VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(machine_id, table_name)
                    DO UPDATE SET last_synced_at=excluded.last_synced_at,
-                                 rows_received=rows_received + excluded.rows_received,
+                                 rows_stored=rows_stored + excluded.rows_stored,
                                  updated_at=excluded.updated_at""",
                 (req.machine_id, req.table, now, inserted, now),
             )
@@ -248,7 +256,7 @@ def sync_push(req: PushRequest, x_sync_token: str | None = Header(None)):
         log.error("Database error during push: machine=%s table=%s", req.machine_id, req.table)
         raise HTTPException(status_code=500, detail={"error": "database error"})
 
-    log.info("Push: machine=%s table=%s inserted=%d skipped=%d", req.machine_id, req.table, inserted, skipped)
+    log.info("push: machine=%s table=%s inserted=%d skipped=%d", req.machine_id, req.table, inserted, skipped)
     return {"inserted": inserted, "skipped": skipped, "table": req.table, "machine_id": req.machine_id}
 
 

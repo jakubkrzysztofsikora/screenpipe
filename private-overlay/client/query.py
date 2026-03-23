@@ -20,6 +20,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlencode
 
 
 # ── Config ───────────────────────────────────────────────────────
@@ -53,9 +54,9 @@ SYNC_TOKEN = ENV.get("SYNC_TOKEN", "")
 def _request(method, path, params=None):
     """Make an HTTP request to the sync server."""
     if params:
-        query = "&".join(f"{k}={v}" for k, v in params.items() if v is not None)
-        if query:
-            path = f"{path}?{query}"
+        filtered = {k: v for k, v in params.items() if v is not None}
+        if filtered:
+            path = f"{path}?{urlencode(filtered)}"
 
     try:
         conn = http.client.HTTPConnection("localhost", SYNC_PORT, timeout=10)
@@ -144,7 +145,7 @@ def cmd_status(args):
         mid = m.get("machine_id", "?")[:17]
         table = m.get("table_name", "?")[:21]
         last = m.get("last_synced_at", "?")[:21]
-        rows = m.get("rows_received", 0)
+        rows = m.get("rows_stored", 0)
         print(f"{mid:<18}| {table:<22}| {last:<22}| {rows}")
 
     print(f"\nTotal machines: {data.get('total_machines', 0)}")
@@ -166,7 +167,7 @@ def cmd_machines(args):
     for m in machines_data:
         mid = m.get("machine_id", "?")
         last = m.get("last_synced_at", "")
-        rows = m.get("rows_received", 0)
+        rows = m.get("rows_stored", 0)
         if mid not in by_machine:
             by_machine[mid] = {"last_sync": last, "total_rows": 0}
         if last > by_machine[mid]["last_sync"]:

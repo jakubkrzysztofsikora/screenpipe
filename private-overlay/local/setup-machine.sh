@@ -31,6 +31,7 @@ log "Python $PY_VERSION found"
 # ── 2. Create directories ───────────────────────────────────────
 log "Creating directories..."
 mkdir -p "$HOME/.screenpipe-private/logs"
+chmod 700 "$HOME/.screenpipe-private/logs"
 mkdir -p "$HOME/.config/screenpipe-private"
 
 # ── 3. Copy .env.example ────────────────────────────────────────

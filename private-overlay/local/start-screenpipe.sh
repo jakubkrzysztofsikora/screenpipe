@@ -51,13 +51,15 @@ else
 fi
 
 # ── Launch screenpipe ────────────────────────────────────────────
+# NOTE: --fps and Ollama URL are config-file settings, not CLI flags.
+# Set them in ~/.screenpipe/settings.json (or via the desktop app settings).
+# Example settings.json snippet:
+#   { "fps": 0.5, "aiUrl": "http://localhost:<OLLAMA_TUNNEL_LOCAL_PORT>" }
 echo "Starting screenpipe: machine=${MACHINE_NAME} data=${SCREENPIPE_DATA_DIR}"
 
-exec screenpipe \
+exec screenpipe record \
     --disable-telemetry \
     --data-dir "${SCREENPIPE_DATA_DIR}" \
-    --fps "${SCREENPIPE_FPS:-0.5}" \
     --port "${SCREENPIPE_PORT:-3030}" \
-    --device-name "${MACHINE_NAME}" \
-    --ollama-url "http://localhost:${OLLAMA_TUNNEL_LOCAL_PORT:-11434}" \
-    ${SCREENPIPE_DISABLE_AUDIO:+--disable-audio}
+    --sync-machine-id "${MACHINE_NAME}" \
+    ${SCREENPIPE_DISABLE_AUDIO:+"--disable-audio"}

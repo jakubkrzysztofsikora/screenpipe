@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS frames (
     focused BOOLEAN,
     browser_url TEXT,
     device_name TEXT,
-    sync_id TEXT UNIQUE,
+    sync_id TEXT NOT NULL UNIQUE,
     machine_id TEXT NOT NULL,
     synced_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS ocr_text (
     window_name TEXT,
     focused BOOLEAN,
     text_json TEXT,
-    sync_id TEXT UNIQUE,
+    sync_id TEXT NOT NULL UNIQUE,
     machine_id TEXT NOT NULL,
     synced_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS audio_transcriptions (
     is_input_device BOOLEAN,
     segment_start_time REAL,
     segment_end_time REAL,
-    sync_id TEXT UNIQUE,
+    sync_id TEXT NOT NULL UNIQUE,
     machine_id TEXT NOT NULL,
     synced_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -112,14 +112,19 @@ CREATE TABLE IF NOT EXISTS meetings (
 );
 
 -- sync_state: tracks last successful sync per machine per table
+-- rows_stored = rows actually inserted (not counting duplicates skipped by INSERT OR IGNORE)
 CREATE TABLE IF NOT EXISTS sync_state (
     machine_id TEXT NOT NULL,
     table_name TEXT NOT NULL,
     last_synced_at TEXT NOT NULL,
-    rows_received INTEGER NOT NULL DEFAULT 0,
+    rows_stored INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (machine_id, table_name)
 );
+
+-- FTS maintenance: run weekly to merge FTS5 segment trees and keep search fast
+-- docker compose exec sync-server sqlite3 /data/db.sqlite \
+--   "INSERT INTO ocr_fts(ocr_fts) VALUES('optimize'); INSERT INTO audio_fts(audio_fts) VALUES('optimize');"
 
 -- FTS triggers for ocr_text
 CREATE TRIGGER IF NOT EXISTS ocr_fts_insert AFTER INSERT ON ocr_text BEGIN

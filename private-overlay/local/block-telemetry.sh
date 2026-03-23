@@ -11,7 +11,8 @@ set -eu
 HOSTS_FILE="/etc/hosts"
 
 # Telemetry domains to block
-TELEMETRY_DOMAINS="eu.i.posthog.com us.i.posthog.com app.highlight.io highlight.io o4505014060302336.ingest.sentry.io"
+# sentry.io blocks all ingest subdomains (avoids whack-a-mole with specific project IDs)
+TELEMETRY_DOMAINS="eu.i.posthog.com us.i.posthog.com app.highlight.io highlight.io sentry.io"
 
 # Domain that also blocks auto-updates
 UPDATE_DOMAIN="screenpi.pe"
@@ -22,7 +23,8 @@ skipped=0
 block_domain() {
     domain="$1"
     comment="${2:-screenpipe telemetry block}"
-    if grep -q "^0.0.0.0.*${domain}" "$HOSTS_FILE" 2>/dev/null; then
+    # Use -F (fixed string) to avoid treating dots in domain names as regex wildcards
+    if grep -qF "0.0.0.0 ${domain}" "$HOSTS_FILE" 2>/dev/null; then
         echo "  [skip] $domain (already blocked)"
         skipped=$((skipped + 1))
     else

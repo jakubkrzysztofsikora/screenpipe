@@ -185,6 +185,18 @@ def sync_table(table_info, state):
 
         row_dicts = [dict(r) for r in rows]
 
+        # Drop rows with NULL sync_id for tables that use it as a dedup key.
+        # A NULL sync_id would be silently ignored by INSERT OR IGNORE on the central DB
+        # (NULL != NULL in SQLite UNIQUE constraints), causing duplicate rows on re-sync.
+        if "sync_id" in columns:
+            before = len(row_dicts)
+            row_dicts = [r for r in row_dicts if r.get("sync_id") is not None]
+            dropped = before - len(row_dicts)
+            if dropped:
+                log.warning("table=%s: dropped %d rows with NULL sync_id", name, dropped)
+            if not row_dicts:
+                return
+
         # Push to server
         status, resp = _post_json("/sync/push", {
             "machine_id": MACHINE_NAME,
@@ -207,9 +219,10 @@ def sync_table(table_info, state):
                 resp.get("inserted", "?"), resp.get("skipped", "?"),
             )
         elif 400 <= status < 500:
+            # Do not log response body — it may echo column names or other internal detail
             log.error(
-                "Client error pushing %s: HTTP %d — %s (not retrying)",
-                name, status, resp.get("detail", resp),
+                "Client error pushing %s: HTTP %d (not retrying — check server logs)",
+                name, status,
             )
         else:
             log.warning(

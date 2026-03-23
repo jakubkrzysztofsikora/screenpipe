@@ -5,28 +5,36 @@
 # Access via SSH tunnel only — never expose ports externally
 
 services:
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "127.0.0.1:11434:11434"
-    volumes:
-      - ./ollama-data:/root/.ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 14g
-          cpus: '3.5'
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    networks:
-      - screenpipe-private
+  # ── Ollama (opt-in) ────────────────────────────────────────────
+  # Uncomment to enable. Requires a VM with ≥ 8 GB RAM (GP1-S or larger).
+  # On DEV1-M (4 GB), llama3.2 will starve the sync-server of memory.
+  # Pin the image to a specific digest before deploying:
+  #   docker pull ollama/ollama:latest
+  #   docker inspect ollama/ollama:latest --format='{{index .RepoDigests 0}}'
+  # Then replace 'ollama/ollama:latest' with the digest.
+  #
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   ports:
+  #     - "127.0.0.1:11434:11434"
+  #   volumes:
+  #     - ./ollama-data:/root/.ollama
+  #   environment:
+  #     - OLLAMA_HOST=0.0.0.0
+  #   restart: unless-stopped
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 6g
+  #         cpus: '3.0'
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s
+  #   networks:
+  #     - screenpipe-private
 
   sync-server:
     build: ./sync-server/
