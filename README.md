@@ -98,6 +98,52 @@ then ask claude `what did i see in the last 5 mins?` or `summarize today convers
 - ~20gb storage/month
 - works offline
 
+## hardened mode (self-hosted, multi-machine)
+
+for users who need full isolation — no telemetry, no cloud, multi-machine sync over SSH tunnels only.
+
+the `private-overlay/` directory contains a complete self-hosted stack:
+
+```
+┌─────────────────┐     ┌─────────────────┐
+│  Machine A      │     │  Machine B      │
+│  screenpipe     │     │  screenpipe     │
+│  sync-daemon    │     │  sync-daemon    │
+└───────┬─────────┘     └───────┬─────────┘
+        │   SSH tunnels only    │
+        └───────────┬───────────┘
+                    │
+        ┌───────────▼───────────┐
+        │   Your VM (private)   │
+        │   sync-server + ollama│
+        │   LUKS encrypted disk │
+        │   firewall: SSH only  │
+        └───────────────────────┘
+```
+
+**what it does:**
+- blocks all telemetry endpoints (`posthog`, `highlight.io`, `sentry`)
+- syncs screen/audio data across machines via a central FastAPI server
+- all traffic over SSH tunnels — zero internet-exposed ports
+- HMAC-SHA256 token auth, LUKS disk encryption on server
+- Ollama tunneled for local AI inference
+- never modifies screenpipe core files
+
+**quick start:**
+```bash
+# on your VM
+cd private-overlay && sudo ./vm/setup.sh
+
+# on each client machine
+cd private-overlay && ./local/setup-machine.sh
+# edit ~/.config/screenpipe-private/.env
+# add SSH key to VM, then:
+./local/tunnel-manager.sh &
+./local/start-screenpipe.sh
+```
+
+see [`private-overlay/README.md`](private-overlay/README.md) for the full setup guide.
+
 ---
 
 <p align="center">
