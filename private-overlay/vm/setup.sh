@@ -25,41 +25,68 @@ log "All prerequisites found"
 # This server stores sensitive screen capture data (OCR text, audio transcriptions).
 # Unencrypted storage is not acceptable — a block volume without LUKS is readable
 # by anyone who can attach it to another VM (e.g., via Scaleway console).
-if [ ! -b /dev/sdb ]; then
-    die "/dev/sdb not found. Attach a Scaleway block volume before running setup.
+
+# Auto-detect the data block device (exclude the root disk).
+# Scaleway SBS volumes may appear as /dev/sda OR /dev/sdb depending on instance type.
+# Override with: DATA_BLOCK_DEV=/dev/sdb ./vm/setup.sh
+if [ -z "${DATA_BLOCK_DEV:-}" ]; then
+    ROOT_PART=$(df / | tail -1 | cut -d' ' -f1)
+    ROOT_DISK=$(lsblk -no pkname "$ROOT_PART" 2>/dev/null || basename "$ROOT_PART" | sed 's/[0-9]*$//')
+    DATA_BLOCK_DEV=""
+    for _dev in /dev/sda /dev/sdb /dev/vdb /dev/xvdb; do
+        if [ -b "$_dev" ] && ! echo "$_dev" | grep -qF "$ROOT_DISK"; then
+            DATA_BLOCK_DEV="$_dev"
+            break
+        fi
+    done
+    # Fallback: any block device not matching root
+    if [ -z "$DATA_BLOCK_DEV" ]; then
+        for _dev in /dev/sda /dev/sdb /dev/vda /dev/vdb; do
+            if [ -b "$_dev" ] && [ "/dev/$ROOT_DISK" != "$_dev" ]; then
+                DATA_BLOCK_DEV="$_dev"
+                break
+            fi
+        done
+    fi
+fi
+
+if [ -z "${DATA_BLOCK_DEV:-}" ] || [ ! -b "$DATA_BLOCK_DEV" ]; then
+    die "No block volume found (tried /dev/sda, /dev/sdb, /dev/vdb). Attach a Scaleway block volume before running setup.
 Screenpipe stores sensitive screen capture data — LUKS encryption is required.
 Steps:
   1. In the Scaleway console, create a block volume (≥ 30 GB) and attach to this instance.
-  2. Re-run this script."
+  2. Re-run this script.
+  3. Or set DATA_BLOCK_DEV=/dev/sdX to override auto-detection."
 fi
+log "Data block device: $DATA_BLOCK_DEV"
 
 if mount | grep -q ' /data '; then
     log "LUKS volume already mounted at /data — skipping"
 else
     KEYFILE="/root/.luks-screenpipe.key"
-    log "Setting up LUKS encrypted volume on /dev/sdb..."
+    log "Setting up LUKS encrypted volume on $DATA_BLOCK_DEV..."
 
-    if ! cryptsetup isLuks /dev/sdb 2>/dev/null; then
-        log "Formatting /dev/sdb with LUKS..."
+    if ! cryptsetup isLuks "$DATA_BLOCK_DEV" 2>/dev/null; then
+        log "Formatting $DATA_BLOCK_DEV with LUKS..."
         # Generate a random keyfile stored on the root partition.
         # Threat model: protects data if the block volume is detached/cloned.
         # Root partition access = full access anyway, so keyfile-on-root is acceptable.
         openssl rand -base64 64 > "$KEYFILE"
         chmod 400 "$KEYFILE"
         log "LUKS keyfile written to $KEYFILE (mode 400)"
-        cryptsetup luksFormat --batch-mode --key-file "$KEYFILE" /dev/sdb
+        cryptsetup luksFormat --batch-mode --key-file "$KEYFILE" "$DATA_BLOCK_DEV"
         log "LUKS formatted"
     else
-        log "/dev/sdb is already LUKS formatted"
+        log "$DATA_BLOCK_DEV is already LUKS formatted"
         if [ ! -f "$KEYFILE" ]; then
-            die "LUKS keyfile not found at $KEYFILE but /dev/sdb is already LUKS formatted.
-Run: cryptsetup open /dev/sdb screenpipe-data and mount /dev/mapper/screenpipe-data /data manually."
+            die "LUKS keyfile not found at $KEYFILE but $DATA_BLOCK_DEV is already LUKS formatted.
+Run: cryptsetup open $DATA_BLOCK_DEV screenpipe-data and mount /dev/mapper/screenpipe-data /data manually."
         fi
     fi
 
     if [ ! -e /dev/mapper/screenpipe-data ]; then
         log "Opening LUKS volume with keyfile..."
-        cryptsetup open --key-file "$KEYFILE" /dev/sdb screenpipe-data
+        cryptsetup open --key-file "$KEYFILE" "$DATA_BLOCK_DEV" screenpipe-data
     fi
 
     if ! blkid /dev/mapper/screenpipe-data | grep -q ext4; then
@@ -73,7 +100,7 @@ Run: cryptsetup open /dev/sdb screenpipe-data and mount /dev/mapper/screenpipe-d
 
     # Persist in crypttab (keyfile-based, auto-unlocks on boot) and fstab
     if ! grep -q 'screenpipe-data' /etc/crypttab 2>/dev/null; then
-        echo "screenpipe-data /dev/sdb $KEYFILE luks" >> /etc/crypttab
+        echo "screenpipe-data $DATA_BLOCK_DEV $KEYFILE luks" >> /etc/crypttab
     fi
     if ! grep -q '/dev/mapper/screenpipe-data' /etc/fstab 2>/dev/null; then
         echo "/dev/mapper/screenpipe-data /data ext4 defaults 0 2" >> /etc/fstab
@@ -83,6 +110,9 @@ fi
 # ── 3. Create data directories ──────────────────────────────────
 log "Creating data directories..."
 mkdir -p /data/screenpipe-central
+# UID 1000 = syncuser inside the sync-server container (see Dockerfile)
+# Without this, SQLite cannot create db.sqlite in the volume-mounted directory.
+chown -R 1000:1000 /data/screenpipe-central
 mkdir -p /opt/screenpipe-private
 
 # ── 4. Copy docker-compose and sync-server ──────────────────────
