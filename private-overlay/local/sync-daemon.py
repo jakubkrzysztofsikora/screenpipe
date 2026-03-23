@@ -13,8 +13,10 @@ import logging
 import logging.handlers
 import os
 import sqlite3
+import ssl
 import sys
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
@@ -32,8 +34,20 @@ SCREENPIPE_DATA_DIR = os.path.expanduser(_require_env("SCREENPIPE_DATA_DIR"))
 DB_PATH = os.path.join(SCREENPIPE_DATA_DIR, "db.sqlite")
 SYNC_TOKEN = _require_env("SYNC_TOKEN")
 MACHINE_NAME = _require_env("MACHINE_NAME")
-SYNC_PORT = int(_require_env("SYNC_TUNNEL_LOCAL_PORT", "8765"))
 SYNC_INTERVAL = int(_require_env("SYNC_INTERVAL_SECONDS", "60"))
+
+# SYNC_SERVER_URL overrides the SSH-tunnel default (http://localhost:PORT).
+# Set this when SSH tunnel is unavailable (e.g., Cato VPN blocks SSH).
+# Example: SYNC_SERVER_URL=https://my-tunnel.trycloudflare.com
+_sync_port_default = int(_require_env("SYNC_TUNNEL_LOCAL_PORT", "8765"))
+_sync_url_raw = os.environ.get(
+    "SYNC_SERVER_URL", f"http://localhost:{_sync_port_default}"
+)
+_parsed_url = urllib.parse.urlparse(_sync_url_raw)
+SYNC_SCHEME = _parsed_url.scheme  # "http" or "https"
+SYNC_HOST = _parsed_url.hostname
+SYNC_PORT = _parsed_url.port or (443 if SYNC_SCHEME == "https" else 80)
+SYNC_BASE_PATH = _parsed_url.path.rstrip("/")
 
 STATE_DIR = Path.home() / ".screenpipe-private"
 STATE_FILE = STATE_DIR / ".sync_state.json"
@@ -131,14 +145,19 @@ def save_state(state):
 
 def _post_json(path, body):
     """POST JSON to sync server. Returns (status_code, response_body_dict)."""
-    conn = http.client.HTTPConnection("localhost", SYNC_PORT, timeout=30)
+    full_path = SYNC_BASE_PATH + path
+    if SYNC_SCHEME == "https":
+        ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(SYNC_HOST, SYNC_PORT, timeout=30, context=ctx)
+    else:
+        conn = http.client.HTTPConnection(SYNC_HOST, SYNC_PORT, timeout=30)
     try:
         data = json.dumps(body, default=_json_default)
         headers = {
             "Content-Type": "application/json",
             "X-Sync-Token": SYNC_TOKEN,
         }
-        conn.request("POST", path, body=data, headers=headers)
+        conn.request("POST", full_path, body=data, headers=headers)
         resp = conn.getresponse()
         resp_body = resp.read().decode("utf-8")
         try:
@@ -250,8 +269,8 @@ def sync_all_tables():
 
 def main():
     log.info(
-        "Sync daemon started: machine=%s db=%s interval=%ds server=localhost:%d",
-        MACHINE_NAME, DB_PATH, SYNC_INTERVAL, SYNC_PORT,
+        "Sync daemon started: machine=%s db=%s interval=%ds server=%s",
+        MACHINE_NAME, DB_PATH, SYNC_INTERVAL, _sync_url_raw,
     )
 
     if not os.path.exists(DB_PATH):

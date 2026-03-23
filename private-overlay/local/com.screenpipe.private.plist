@@ -26,7 +26,7 @@
     <array>
         <string>/usr/bin/python3</string>
         <!-- EDIT THIS PATH after setup -->
-        <string>REPLACE_WITH_ABSOLUTE_PATH/private-overlay/local/sync-daemon.py</string>
+        <string>REPLACE_WITH_ABSOLUTE_PATH/local/sync-daemon.py</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -36,6 +36,9 @@
         <key>MACHINE_NAME</key><string>REPLACE</string>
         <key>SYNC_TUNNEL_LOCAL_PORT</key><string>8765</string>
         <key>SYNC_INTERVAL_SECONDS</key><string>60</string>
+        <!-- Set SYNC_SERVER_URL if SSH tunnel is unavailable (e.g. Cato VPN blocks SSH). -->
+        <!-- Leave unset to use the default SSH tunnel: http://localhost:8765             -->
+        <!-- <key>SYNC_SERVER_URL</key><string>https://your-tunnel.trycloudflare.com</string> -->
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
