@@ -4,6 +4,11 @@ A security-hardened, multi-machine overlay for [screenpipe](https://github.com/s
 
 **This overlay never modifies screenpipe core files.** It sits alongside screenpipe and can be updated independently.
 
+## Quick links
+
+- **[Server Setup Guide](docs/SERVER_SETUP.md)** — full guide to deploying the VM and sync server
+- **[Client Setup Guide](docs/CLIENT_SETUP.md)** — full guide to setting up each client machine
+
 ## Architecture
 
 ```
@@ -283,6 +288,10 @@ private-overlay/
 ├── README.md                          # This file
 ├── .env.example                       # Template for all env vars
 ├── .gitignore                         # Ignores secrets, DBs, logs
+│
+├── docs/
+│   ├── SERVER_SETUP.md                # Full server installation guide
+│   └── CLIENT_SETUP.md               # Full client installation guide
 │
 ├── vm/                                # VM-side components
 │   ├── docker-compose.yml             # sync-server stack (Ollama opt-in)
