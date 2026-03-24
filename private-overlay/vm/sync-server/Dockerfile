@@ -19,4 +19,6 @@ USER syncuser
 
 EXPOSE 8765
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8765", "--workers", "2"]
+# Single worker: OAuth state (auth codes, tokens) is in-memory and not shared
+# across workers. Multiple workers would cause token exchange to fail.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8765", "--workers", "1"]
