@@ -68,8 +68,13 @@ class AuthCode:
 
 # ── Login form HTML ───────────────────────────────────────────────────────────
 
-def _login_form(action: str, error: str = "") -> str:
+def _login_form(action: str, params: dict[str, str] | None = None, error: str = "") -> str:
     error_html = f'<p class="error">{error}</p>' if error else ""
+    hidden_fields = ""
+    for k, v in (params or {}).items():
+        # HTML-escape the value to prevent XSS
+        escaped = v.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+        hidden_fields += f'      <input type="hidden" name="{k}" value="{escaped}">\n'
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -157,7 +162,7 @@ def _login_form(action: str, error: str = "") -> str:
     <h1>Connect to your data</h1>
     <p class="sub">Enter your sync token to authorise claude.ai access.</p>
     <form method="post" action="{action}">
-      <label for="token">Sync token</label>
+{hidden_fields}      <label for="token">Sync token</label>
       <input type="password" id="token" name="token" placeholder="your-sync-token" autofocus required>
       {error_html}
       <button type="submit">Authorise</button>
@@ -292,9 +297,16 @@ oauth_router = APIRouter()
 
 @oauth_router.get("/login", response_class=HTMLResponse, include_in_schema=False)
 async def login_form(request: Request):
-    """Serve the login form. All OAuth state is in query params."""
-    qs = str(request.url).split("?", 1)[1] if "?" in str(request.url) else ""
-    return HTMLResponse(_login_form(action=f"/login?{qs}"))
+    """Serve the login form. OAuth state passed as hidden form fields."""
+    params = {
+        "client_id": request.query_params.get("client_id", ""),
+        "redirect_uri": request.query_params.get("redirect_uri", ""),
+        "code_challenge": request.query_params.get("code_challenge", ""),
+        "state": request.query_params.get("state", ""),
+        "scope": request.query_params.get("scope", ""),
+        "resource": request.query_params.get("resource", ""),
+    }
+    return HTMLResponse(_login_form(action="/login", params=params))
 
 
 @oauth_router.post("/login", response_class=HTMLResponse, include_in_schema=False)
@@ -333,7 +345,8 @@ async def login_submit(
         log.warning("Login failed: incorrect sync token")
         return HTMLResponse(
             _login_form(
-                action=f"/login?{qs}",
+                action="/login",
+                params=qs_params,
                 error="Incorrect sync token — check your .env file.",
             ),
             status_code=401,
