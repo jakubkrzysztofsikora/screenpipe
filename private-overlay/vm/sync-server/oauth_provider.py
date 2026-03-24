@@ -43,6 +43,8 @@ SYNC_TOKEN = os.environ.get("SYNC_TOKEN", "")
 
 # client_id → OAuthClientInformationFull
 _clients: dict[str, OAuthClientInformationFull] = {}
+# client_id → registration timestamp (for TTL-based eviction)
+_client_created: dict[str, float] = {}
 
 # auth_code string → AuthCode dataclass
 _auth_codes: dict[str, "AuthCode"] = {}
@@ -52,6 +54,7 @@ _access_tokens: dict[str, AccessToken] = {}
 
 AUTH_CODE_TTL = 600       # 10 minutes
 ACCESS_TOKEN_TTL = 86400  # 24 hours
+CLIENT_TTL = 86400        # 24 hours — registered clients expire
 
 # Limits to prevent memory exhaustion (V-007)
 MAX_REGISTERED_CLIENTS = 100
@@ -72,7 +75,7 @@ class AuthCode:
 
 
 def _cleanup_expired():
-    """Proactively purge expired auth codes and access tokens."""
+    """Proactively purge expired auth codes, access tokens, and stale clients."""
     now = time.time()
     expired_codes = [k for k, v in _auth_codes.items() if now > v.expires_at]
     for k in expired_codes:
@@ -83,16 +86,23 @@ def _cleanup_expired():
     ]
     for k in expired_tokens:
         del _access_tokens[k]
+    expired_clients = [k for k, t in _client_created.items() if now - t > CLIENT_TTL]
+    for k in expired_clients:
+        _clients.pop(k, None)
+        del _client_created[k]
 
 
 # ── Login form HTML ───────────────────────────────────────────────────────────
 
+def _html_escape(s: str) -> str:
+    return s.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _login_form(action: str, params: dict[str, str] | None = None, error: str = "") -> str:
-    error_html = f'<p class="error">{error}</p>' if error else ""
+    error_html = f'<p class="error">{_html_escape(error)}</p>' if error else ""
     hidden_fields = ""
     for k, v in (params or {}).items():
-        # HTML-escape the value to prevent XSS
-        escaped = v.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+        escaped = _html_escape(v)
         hidden_fields += f'      <input type="hidden" name="{k}" value="{escaped}">\n'
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -226,6 +236,7 @@ class SyncTokenOAuthProvider(OAuthAuthorizationServerProvider):
                 raise ValueError("redirect_uris must use https (or http://localhost for development)")
         log.info("DCR: registered client_id=%s", client_info.client_id)
         _clients[client_info.client_id] = client_info
+        _client_created[client_info.client_id] = time.time()
 
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
@@ -266,6 +277,10 @@ class SyncTokenOAuthProvider(OAuthAuthorizationServerProvider):
         """
         Called by the SDK after PKCE is validated. Issue an access token.
         """
+        _cleanup_expired()
+        if len(_access_tokens) >= MAX_ACCESS_TOKENS:
+            log.warning("Token limit reached (%d)", MAX_ACCESS_TOKENS)
+            raise ValueError(f"Maximum access tokens ({MAX_ACCESS_TOKENS}) reached")
         raw_token = secrets.token_hex(32)
         scopes = authorization_code.scopes
 
