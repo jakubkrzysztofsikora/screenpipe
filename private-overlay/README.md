@@ -7,6 +7,7 @@ A security-hardened, multi-machine overlay for [screenpipe](https://github.com/s
 ## Quick links
 
 - **[Server Setup Guide](docs/SERVER_SETUP.md)** — full guide to deploying the VM and sync server
+- **[MCP Setup Guide](docs/MCP_SETUP.md)** — connect Claude Desktop, Claude Code, or claude.ai to your data
 - **[Client Setup Guide](docs/CLIENT_SETUP.md)** — full guide to setting up each client machine
 
 ## Architecture
@@ -210,20 +211,53 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.screenpipe.private.s
 
 **Note:** `trycloudflare.com` quick-tunnel URLs change on every service restart. For a stable URL, set up a [named Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) with a free Cloudflare account and domain.
 
+## MCP Server (Claude integration)
+
+The sync server includes a remote MCP server with OAuth 2.1 authentication. Connect it to **claude.ai**, **Claude Desktop**, or **Claude Code** to query your screen data from any conversation.
+
+### claude.ai (Custom Connectors)
+
+1. Settings → Integrations → Add Custom Connector
+2. URL: `https://your-tunnel.trycloudflare.com/mcp`
+3. Enter your `SYNC_TOKEN` on the auth form → connected
+
+### Claude Code
+
+```sh
+claude mcp add screenpipe-private \
+  --transport streamable-http \
+  --url https://your-tunnel.trycloudflare.com/mcp
+```
+
+Available tools: `search`, `recent_activity`, `status`, `timeline`
+
+See **[MCP Setup Guide](docs/MCP_SETUP.md)** for full details.
+
+## Web UI
+
+The sync server serves a dark-themed dashboard at the root URL:
+
+```
+https://your-tunnel.trycloudflare.com/ui
+```
+
+Features: token-gated auth, full-text cross-machine search, activity timeline (auto-refresh), status sidebar showing connected machines.
+
 ## Verifying Everything Works
 
 ```sh
 # Check sync daemon logs
 tail -f ~/.screenpipe-private/logs/sync-daemon.log
 
-# Check sync status across all machines
-python3 private-overlay/client/query.py status
+# Check server health (via cloudflared)
+curl https://your-tunnel.trycloudflare.com/health
 
-# Search across all machines
-python3 private-overlay/client/query.py search "meeting notes"
+# Check sync status
+curl -H "X-Sync-Token: $SYNC_TOKEN" https://your-tunnel.trycloudflare.com/sync/status
 
-# Show recent data
-python3 private-overlay/client/query.py tail
+# Search (via API)
+curl -H "X-Sync-Token: $SYNC_TOKEN" \
+  "https://your-tunnel.trycloudflare.com/sync/search?q=meeting+notes"
 ```
 
 ## Security Notes
@@ -301,7 +335,10 @@ private-overlay/
 │       ├── Dockerfile
 │       ├── requirements.txt
 │       ├── main.py                    # FastAPI sync server
-│       └── schema.sql                 # Central DB schema
+│       ├── schema.sql                 # Central DB schema
+│       ├── mcp_tools.py              # MCP tool definitions (search, timeline, etc.)
+│       ├── oauth_provider.py         # OAuth 2.1 provider (SYNC_TOKEN auth)
+│       └── ui.py                     # Web UI dashboard
 │
 ├── local/                             # Client machine components
 │   ├── start-screenpipe.sh            # Launcher — auto-selects SSH or cloudflared

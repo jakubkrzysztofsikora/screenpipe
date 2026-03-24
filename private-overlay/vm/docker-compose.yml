@@ -46,6 +46,7 @@ services:
       - SYNC_TOKEN=${SYNC_TOKEN}
       - DB_PATH=/data/db.sqlite
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - MCP_BASE_URL=${MCP_BASE_URL:-http://localhost:8765}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
