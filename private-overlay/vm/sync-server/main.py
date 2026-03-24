@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 # ── Logging ──────────────────────────────────────────────────────
@@ -165,6 +165,9 @@ class PushRequest(BaseModel):
 
 # ── FastAPI App ──────────────────────────────────────────────────
 app = FastAPI(title="Screenpipe Private Sync Server", version=VERSION)
+
+from ui import ui_router  # noqa: E402
+app.include_router(ui_router)
 
 
 @app.on_event("startup")
