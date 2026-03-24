@@ -91,7 +91,8 @@ case "$OS" in
                 -e "s|REPLACE_WITH_HOME|${HOME}|g" \
                 -e "s|<string>REPLACE</string><!-- SCREENPIPE_DATA_DIR -->|<string>${SCREENPIPE_DATA_DIR:-~/.screenpipe}</string>|g" \
                 "$PLIST_SRC" > "$PLIST_DEST" 2>/dev/null || cp "$PLIST_SRC" "$PLIST_DEST"
-            log "LaunchAgent installed at $PLIST_DEST"
+            chmod 600 "$PLIST_DEST"
+            log "LaunchAgent installed at $PLIST_DEST (mode 600)"
             echo "  Load with: launchctl load $PLIST_DEST"
         else
             log "WARNING: plist template not found at $PLIST_SRC"

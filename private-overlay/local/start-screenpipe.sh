@@ -36,8 +36,11 @@ if [ -z "${SCREENPIPE_DATA_DIR:-}" ]; then
     exit 1
 fi
 
-# Expand ~ in SCREENPIPE_DATA_DIR
-SCREENPIPE_DATA_DIR="$(eval echo "$SCREENPIPE_DATA_DIR")"
+# Expand ~ in SCREENPIPE_DATA_DIR (safe: no eval, only tilde expansion)
+case "$SCREENPIPE_DATA_DIR" in
+    "~/"*) SCREENPIPE_DATA_DIR="$HOME/${SCREENPIPE_DATA_DIR#\~/}" ;;
+    "~")   SCREENPIPE_DATA_DIR="$HOME" ;;
+esac
 
 # ── Check screenpipe binary ──────────────────────────────────────
 if ! command -v screenpipe >/dev/null 2>&1; then

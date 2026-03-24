@@ -53,6 +53,11 @@ _access_tokens: dict[str, AccessToken] = {}
 AUTH_CODE_TTL = 600       # 10 minutes
 ACCESS_TOKEN_TTL = 86400  # 24 hours
 
+# Limits to prevent memory exhaustion (V-007)
+MAX_REGISTERED_CLIENTS = 100
+MAX_AUTH_CODES = 500
+MAX_ACCESS_TOKENS = 500
+
 
 @dataclass
 class AuthCode:
@@ -64,6 +69,20 @@ class AuthCode:
     scopes: list[str]
     resource: str | None
     expires_at: float
+
+
+def _cleanup_expired():
+    """Proactively purge expired auth codes and access tokens."""
+    now = time.time()
+    expired_codes = [k for k, v in _auth_codes.items() if now > v.expires_at]
+    for k in expired_codes:
+        del _auth_codes[k]
+    expired_tokens = [
+        k for k, v in _access_tokens.items()
+        if v.expires_at is not None and now > v.expires_at
+    ]
+    for k in expired_tokens:
+        del _access_tokens[k]
 
 
 # ── Login form HTML ───────────────────────────────────────────────────────────
@@ -196,6 +215,15 @@ class SyncTokenOAuthProvider(OAuthAuthorizationServerProvider):
         return _clients.get(client_id)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        _cleanup_expired()
+        if len(_clients) >= MAX_REGISTERED_CLIENTS:
+            log.warning("DCR: rejected — client limit reached (%d)", MAX_REGISTERED_CLIENTS)
+            raise ValueError(f"Maximum registered clients ({MAX_REGISTERED_CLIENTS}) reached")
+        # Validate redirect_uris contain only https (or localhost for dev)
+        for uri in (client_info.redirect_uris or []):
+            uri_str = str(uri)
+            if not (uri_str.startswith("https://") or uri_str.startswith("http://localhost")):
+                raise ValueError("redirect_uris must use https (or http://localhost for development)")
         log.info("DCR: registered client_id=%s", client_info.client_id)
         _clients[client_info.client_id] = client_info
 
@@ -350,6 +378,34 @@ async def login_submit(
                 error="Incorrect sync token — check your .env file.",
             ),
             status_code=401,
+        )
+
+    # Validate redirect_uri against registered client (V-004 fix)
+    client = _clients.get(client_id)
+    if not client:
+        log.warning("Login failed: unknown client_id=%s", client_id)
+        return HTMLResponse(
+            _login_form(action="/login", params=qs_params, error="Unknown client."),
+            status_code=400,
+        )
+    allowed_uris = {str(u) for u in (client.redirect_uris or [])}
+    if redirect_uri not in allowed_uris:
+        log.warning(
+            "Login failed: redirect_uri mismatch for client_id=%s: %s not in %s",
+            client_id, redirect_uri, allowed_uris,
+        )
+        return HTMLResponse(
+            _login_form(action="/login", params=qs_params, error="Invalid redirect URI."),
+            status_code=400,
+        )
+
+    # Enforce auth code limit (V-007 fix)
+    _cleanup_expired()
+    if len(_auth_codes) >= MAX_AUTH_CODES:
+        log.warning("Auth code limit reached (%d)", MAX_AUTH_CODES)
+        return HTMLResponse(
+            _login_form(action="/login", params=qs_params, error="Server busy — try again later."),
+            status_code=429,
         )
 
     # Generate auth code

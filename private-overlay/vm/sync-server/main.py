@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # ── Logging ──────────────────────────────────────────────────────
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
@@ -203,8 +204,30 @@ async def _lifespan(application: FastAPI):
         yield
 
 
+# ── Security headers middleware (V-016 fix) ──────────────────────
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'"
+        )
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        return response
+
+
 # ── FastAPI App ──────────────────────────────────────────────────
-app = FastAPI(title="Screenpipe Private Sync Server", version=VERSION, lifespan=_lifespan)
+app = FastAPI(
+    title="Screenpipe Private Sync Server",
+    version=VERSION,
+    lifespan=_lifespan,
+    openapi_url=None,  # V-024: hide OpenAPI schema from unauthenticated users
+)
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(ui_router)
 app.include_router(oauth_router)
