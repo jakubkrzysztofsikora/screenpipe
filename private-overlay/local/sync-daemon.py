@@ -7,6 +7,7 @@ Sync daemon: reads new rows from local screenpipe DB and pushes to central sync 
 Stdlib only — no third-party dependencies.
 """
 
+import hashlib
 import http.client
 import json
 import logging
@@ -101,9 +102,13 @@ SYNC_TABLES = [
         "columns": [
             "audio_chunk_id", "offset_index", "timestamp", "transcription",
             "transcription_engine", "device", "is_input_device",
-            "start_time", "end_time",
             "sync_id",
         ],
+        # Map local DB column names to server-expected names
+        "aliases": {
+            "start_time": "segment_start_time",
+            "end_time": "segment_end_time",
+        },
     },
     {
         "name": "memories",
@@ -176,9 +181,16 @@ def _json_default(obj):
 
 # ── Sync logic ───────────────────────────────────────────────────
 
+def _generate_sync_id(machine_name, table, rowid):
+    """Generate a deterministic sync_id for rows where screenpipe left it NULL."""
+    raw = f"{machine_name}-{table}-{rowid}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
 def sync_table(table_info, state):
     name = table_info["name"]
     columns = table_info["columns"]
+    aliases = table_info.get("aliases", {})
 
     table_state = state.get(name, {})
     last_rowid = table_state.get("last_rowid", 0)
@@ -192,7 +204,14 @@ def sync_table(table_info, state):
         return
 
     try:
-        col_list = ", ".join(columns)
+        # Build SELECT with aliases (e.g. start_time AS segment_start_time)
+        select_parts = []
+        for local_col, server_col in aliases.items():
+            select_parts.append(f"{local_col} AS {server_col}")
+        for col in columns:
+            select_parts.append(col)
+        col_list = ", ".join(select_parts)
+
         # Alias rowid as _rowid — plain "rowid" can collide with INTEGER PRIMARY KEY columns
         query = f"SELECT rowid AS _rowid, {col_list} FROM {name} WHERE rowid > ? ORDER BY rowid ASC LIMIT 500"
         rows = conn.execute(query, (last_rowid,)).fetchall()
@@ -202,6 +221,11 @@ def sync_table(table_info, state):
 
         row_dicts = [dict(r) for r in rows]
         max_rowid = row_dicts[-1]["_rowid"]
+
+        # Generate sync_id for rows where screenpipe left it NULL
+        for r in row_dicts:
+            if "sync_id" in r and (r["sync_id"] is None or r["sync_id"] == ""):
+                r["sync_id"] = _generate_sync_id(MACHINE_NAME, name, r["_rowid"])
 
         # Strip _rowid from payload — server doesn't need it
         for r in row_dicts:

@@ -112,12 +112,12 @@ CREATE TABLE IF NOT EXISTS meetings (
 );
 
 -- sync_state: tracks last successful sync per machine per table
--- rows_stored = rows actually inserted (not counting duplicates skipped by INSERT OR IGNORE)
+-- rows_received = rows actually inserted (not counting duplicates skipped by INSERT OR IGNORE)
 CREATE TABLE IF NOT EXISTS sync_state (
     machine_id TEXT NOT NULL,
     table_name TEXT NOT NULL,
     last_synced_at TEXT NOT NULL,
-    rows_stored INTEGER NOT NULL DEFAULT 0,
+    rows_received INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (machine_id, table_name)
 );

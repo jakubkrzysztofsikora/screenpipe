@@ -317,14 +317,14 @@ def sync_push(req: PushRequest, x_sync_token: str | None = Header(None)):
                 else:
                     skipped += 1
 
-            # Update sync_state (rows_stored = actually inserted, skips not counted)
+            # Update sync_state (rows_received = actually inserted, skips not counted)
             now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             conn.execute(
-                """INSERT INTO sync_state (machine_id, table_name, last_synced_at, rows_stored, updated_at)
+                """INSERT INTO sync_state (machine_id, table_name, last_synced_at, rows_received, updated_at)
                    VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(machine_id, table_name)
                    DO UPDATE SET last_synced_at=excluded.last_synced_at,
-                                 rows_stored=rows_stored + excluded.rows_stored,
+                                 rows_received=rows_received + excluded.rows_received,
                                  updated_at=excluded.updated_at""",
                 (req.machine_id, req.table, now, inserted, now),
             )
