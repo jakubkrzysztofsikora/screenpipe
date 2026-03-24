@@ -9,7 +9,7 @@ import os
 import re
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +28,9 @@ log = logging.getLogger("sync-server")
 # ── Config ───────────────────────────────────────────────────────
 DB_PATH = os.environ.get("DB_PATH", "/data/db.sqlite")
 SYNC_TOKEN = os.environ.get("SYNC_TOKEN", "")
+# Base URL for MCP OAuth (must match the public cloudflared tunnel URL).
+# Example: https://xxxx.trycloudflare.com
+MCP_BASE_URL = os.environ.get("MCP_BASE_URL", "http://localhost:8765").rstrip("/")
 
 # ── Constants ────────────────────────────────────────────────────
 ALLOWED_TABLES = frozenset({
@@ -163,20 +166,56 @@ class PushRequest(BaseModel):
     rows: list[dict]
 
 
-# ── FastAPI App ──────────────────────────────────────────────────
-app = FastAPI(title="Screenpipe Private Sync Server", version=VERSION)
-
 from ui import ui_router  # noqa: E402
-app.include_router(ui_router)
+from oauth_provider import oauth_router  # noqa: E402
+from mcp_tools import create_mcp_app  # noqa: E402
+from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes  # noqa: E402
+from mcp.server.auth.settings import ClientRegistrationOptions  # noqa: E402
+from oauth_provider import oauth_provider  # noqa: E402
+from pydantic import AnyHttpUrl  # noqa: E402
+
+# Build MCP + OAuth routes before app creation so we have the session manager
+_mcp_starlette = create_mcp_app(
+    issuer_url=MCP_BASE_URL,
+    resource_server_url=f"{MCP_BASE_URL}/mcp",
+)
+_oauth_routes = create_auth_routes(
+    provider=oauth_provider,
+    issuer_url=AnyHttpUrl(MCP_BASE_URL),
+    client_registration_options=ClientRegistrationOptions(enabled=True),
+)
+_resource_routes = create_protected_resource_routes(
+    resource_url=AnyHttpUrl(f"{MCP_BASE_URL}/mcp"),
+    authorization_servers=[AnyHttpUrl(MCP_BASE_URL)],
+)
 
 
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
     if not SYNC_TOKEN:
         log.critical("SYNC_TOKEN is not set — refusing to start. Set it in the .env file.")
         raise RuntimeError("SYNC_TOKEN is required")
     log.info("Starting sync server: db=%s version=%s", DB_PATH, VERSION)
     _init_db()
+    # Run the MCP session manager alongside the FastAPI app
+    from mcp_tools import _mcp_instance
+    async with _mcp_instance.session_manager.run():
+        yield
+
+
+# ── FastAPI App ──────────────────────────────────────────────────
+app = FastAPI(title="Screenpipe Private Sync Server", version=VERSION, lifespan=_lifespan)
+
+app.include_router(ui_router)
+app.include_router(oauth_router)
+
+# OAuth routes at domain root (required: claude.ai strips path when constructing
+# /authorize, /token, /register URLs from the issuer metadata).
+for _route in _oauth_routes + _resource_routes:
+    app.add_route(_route.path, _route.endpoint, methods=list(_route.methods or ["GET"]))
+
+# Mount the MCP Streamable HTTP app at /mcp
+app.mount("/mcp", _mcp_starlette)
 
 
 # ── Endpoints ────────────────────────────────────────────────────
