@@ -214,8 +214,45 @@ app.include_router(oauth_router)
 for _route in _oauth_routes + _resource_routes:
     app.add_route(_route.path, _route.endpoint, methods=list(_route.methods or ["GET"]))
 
-# Mount the MCP Streamable HTTP app at /mcp
+# Mount the MCP Streamable HTTP app at /mcp.
+# Starlette's mount redirects /mcp → /mcp/ (307), which breaks claude.ai's
+# POST requests. Add an explicit catch-all route at /mcp that forwards to
+# the ASGI app without the redirect.
 app.mount("/mcp", _mcp_starlette)
+
+
+@app.api_route("/mcp", methods=["GET", "POST", "DELETE"], include_in_schema=False)
+async def mcp_no_trailing_slash(request: Request):
+    """Forward /mcp (no trailing slash) to the mounted MCP ASGI app."""
+    from starlette.responses import Response as StarletteResponse
+
+    scope = dict(request.scope)
+    scope["path"] = "/"
+    scope["root_path"] = scope.get("root_path", "") + "/mcp"
+
+    status_code = 500
+    headers_raw: list[tuple[bytes, bytes]] = []
+    body_parts: list[bytes] = []
+
+    async def receive():
+        return await request._receive()
+
+    async def send(message):
+        nonlocal status_code, headers_raw
+        if message["type"] == "http.response.start":
+            status_code = message["status"]
+            headers_raw = list(message.get("headers", []))
+        elif message["type"] == "http.response.body":
+            body_parts.append(message.get("body", b""))
+
+    await _mcp_starlette(scope, receive, send)
+
+    resp_headers = {k.decode(): v.decode() for k, v in headers_raw}
+    return StarletteResponse(
+        content=b"".join(body_parts),
+        status_code=status_code,
+        headers=resp_headers,
+    )
 
 
 # ── Endpoints ────────────────────────────────────────────────────
