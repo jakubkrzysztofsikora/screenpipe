@@ -77,48 +77,46 @@ log.addHandler(file_handler)
 
 # ── Tables to sync (in order) ───────────────────────────────────
 
+# Pagination uses SQLite rowid (always monotonically increasing, never NULL).
+# The old ts_col approach failed because screenpipe leaves synced_at NULL for
+# rows not processed by its built-in sync, and NULL > anything is false in SQL.
 SYNC_TABLES = [
     {
         "name": "ocr_text",
-        "ts_col": "synced_at",
         "columns": [
             "frame_id", "text", "app_name", "window_name", "focused",
-            "text_json", "sync_id", "machine_id", "synced_at",
+            "text_json", "sync_id",
         ],
     },
     {
         "name": "frames",
-        "ts_col": "synced_at",
         "columns": [
             "video_chunk_id", "offset_index", "timestamp", "app_name",
             "window_name", "focused", "browser_url", "device_name",
-            "sync_id", "machine_id", "synced_at",
+            "sync_id", "machine_id",
         ],
     },
     {
         "name": "audio_transcriptions",
-        "ts_col": "synced_at",
         "columns": [
             "audio_chunk_id", "offset_index", "timestamp", "transcription",
             "transcription_engine", "device", "is_input_device",
-            "segment_start_time", "segment_end_time",
-            "sync_id", "machine_id", "synced_at",
+            "start_time", "end_time",
+            "sync_id",
         ],
     },
     {
         "name": "memories",
-        "ts_col": "created_at",
         "columns": [
             "content", "source", "source_context", "tags", "importance",
-            "machine_id", "created_at", "updated_at",
+            "created_at", "updated_at",
         ],
     },
     {
         "name": "meetings",
-        "ts_col": "created_at",
         "columns": [
             "meeting_start", "meeting_end", "meeting_app", "title",
-            "attendees", "detection_source", "machine_id", "created_at",
+            "attendees", "detection_source", "created_at",
         ],
     },
 ]
@@ -180,11 +178,10 @@ def _json_default(obj):
 
 def sync_table(table_info, state):
     name = table_info["name"]
-    ts_col = table_info["ts_col"]
     columns = table_info["columns"]
 
     table_state = state.get(name, {})
-    last_synced = table_state.get("last_synced_at", "2000-01-01T00:00:00")
+    last_rowid = table_state.get("last_rowid", 0)
 
     # Open DB read-only
     try:
@@ -196,25 +193,19 @@ def sync_table(table_info, state):
 
     try:
         col_list = ", ".join(columns)
-        query = f"SELECT {col_list} FROM {name} WHERE {ts_col} > ? ORDER BY {ts_col} ASC LIMIT 500"
-        rows = conn.execute(query, (last_synced,)).fetchall()
+        # Alias rowid as _rowid — plain "rowid" can collide with INTEGER PRIMARY KEY columns
+        query = f"SELECT rowid AS _rowid, {col_list} FROM {name} WHERE rowid > ? ORDER BY rowid ASC LIMIT 500"
+        rows = conn.execute(query, (last_rowid,)).fetchall()
 
         if not rows:
             return
 
         row_dicts = [dict(r) for r in rows]
+        max_rowid = row_dicts[-1]["_rowid"]
 
-        # Drop rows with NULL sync_id for tables that use it as a dedup key.
-        # A NULL sync_id would be silently ignored by INSERT OR IGNORE on the central DB
-        # (NULL != NULL in SQLite UNIQUE constraints), causing duplicate rows on re-sync.
-        if "sync_id" in columns:
-            before = len(row_dicts)
-            row_dicts = [r for r in row_dicts if r.get("sync_id") is not None]
-            dropped = before - len(row_dicts)
-            if dropped:
-                log.warning("table=%s: dropped %d rows with NULL sync_id", name, dropped)
-            if not row_dicts:
-                return
+        # Strip _rowid from payload — server doesn't need it
+        for r in row_dicts:
+            r.pop("_rowid", None)
 
         # Push to server
         status, resp = _post_json("/sync/push", {
@@ -224,11 +215,9 @@ def sync_table(table_info, state):
         })
 
         if status == 200:
-            # Update state with the latest timestamp from pushed rows
-            latest_ts = row_dicts[-1].get(ts_col, last_synced)
             rows_pushed = table_state.get("rows_pushed", 0) + len(row_dicts)
             state[name] = {
-                "last_synced_at": latest_ts,
+                "last_rowid": max_rowid,
                 "rows_pushed": rows_pushed,
             }
             save_state(state)
@@ -238,7 +227,6 @@ def sync_table(table_info, state):
                 resp.get("inserted", "?"), resp.get("skipped", "?"),
             )
         elif 400 <= status < 500:
-            # Do not log response body — it may echo column names or other internal detail
             log.error(
                 "Client error pushing %s: HTTP %d (not retrying — check server logs)",
                 name, status,
