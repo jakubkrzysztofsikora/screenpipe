@@ -14,6 +14,9 @@
 __pycache__/
 *.pyc
 
+# Override root .gitignore *.py exclusion — our sync-server is Python
+!**/*.py
+
 # Sync daemon state
 .state/
 

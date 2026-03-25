@@ -147,3 +147,62 @@ CREATE TRIGGER IF NOT EXISTS audio_fts_delete AFTER DELETE ON audio_transcriptio
     INSERT INTO audio_fts(audio_fts, rowid, transcription, device, machine_id)
     VALUES ('delete', old.id, old.transcription, old.device, old.machine_id);
 END;
+
+-- ── Activity classification ─────────────────────────────────────
+
+-- Project/activity categories (auto-discovered by LLM or created manually)
+CREATE TABLE IF NOT EXISTS activity_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    color TEXT DEFAULT '#888',
+    description TEXT,
+    source TEXT DEFAULT 'auto',               -- 'auto' | 'default' | 'manual'
+    apps_hint TEXT DEFAULT '[]',              -- JSON array: example app_names for embedding context
+    urls_hint TEXT DEFAULT '[]',              -- JSON array: example URL hostnames
+    embedding BLOB,                           -- float32[768] from nomic-embed-text; NULL until computed
+    embedding_version INTEGER DEFAULT 0,     -- incremented on name/description change → triggers re-embed
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- 15-minute time block classifications
+CREATE TABLE IF NOT EXISTS activity_classifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    machine_id TEXT NOT NULL,
+    project_id INTEGER NOT NULL REFERENCES activity_projects(id),
+    start_time TEXT NOT NULL,                 -- ISO8601, floored to 15-min boundary
+    end_time TEXT NOT NULL,
+    confidence REAL DEFAULT 0.0,             -- cosine similarity score (0–1)
+    status TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'classified' | 'failed'
+    context TEXT,                             -- JSON: {"primary_app","primary_window","browser_url","transition_count"}
+    project_embedding_version INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(machine_id, start_time)           -- one classification per block per machine; ON CONFLICT DO UPDATE
+);
+CREATE INDEX IF NOT EXISTS idx_class_machine ON activity_classifications(machine_id);
+CREATE INDEX IF NOT EXISTS idx_class_time ON activity_classifications(start_time, end_time);
+CREATE INDEX IF NOT EXISTS idx_class_project ON activity_classifications(project_id);
+CREATE INDEX IF NOT EXISTS idx_class_status ON activity_classifications(status);
+
+-- Default project categories (idempotent — INSERT OR IGNORE)
+INSERT OR IGNORE INTO activity_projects (name, color, source, description, apps_hint, urls_hint) VALUES
+    ('Development',        '#00FF9D', 'default', 'Software development and coding',
+     '["Code","Xcode","Terminal","iTerm2","Rider","PyCharm","Cursor","Warp","Vim","Neovim"]',
+     '["github.com","gitlab.com","stackoverflow.com","localhost"]'),
+    ('Communication',      '#3B82F6', 'default', 'Chat and instant messaging',
+     '["Slack","Teams","Discord","Telegram","WhatsApp","Messages"]',
+     '["slack.com","teams.microsoft.com","discord.com"]'),
+    ('Meetings',           '#A855F7', 'default', 'Video and voice calls',
+     '["Zoom","Google Meet","Teams","Whereby","FaceTime"]',
+     '["meet.google.com","zoom.us","whereby.com"]'),
+    ('Email',              '#F59E0B', 'default', 'Email reading and writing',
+     '["Mail","Outlook","Spark","Superhuman"]',
+     '["mail.google.com","outlook.office365.com","outlook.live.com"]'),
+    ('Research/Browsing',  '#EC4899', 'default', 'Web browsing and research',
+     '["Chrome","Safari","Firefox","Arc","Brave"]',
+     '["google.com","wikipedia.org","reddit.com","news.ycombinator.com"]'),
+    ('Admin',              '#6B7280', 'default', 'Administrative and organizational tasks',
+     '["Notion","1Password","Finder","System Preferences","Calendar"]',
+     '["notion.so","calendar.google.com","docs.google.com"]'),
+    ('Other',              '#374151', 'default', 'Uncategorized activity',
+     '[]', '[]');
