@@ -10,7 +10,7 @@ timeline view, and filtering. All HTML/CSS/JS inline.
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -120,9 +120,112 @@ def api_activity_timeline(
             "confidence": r["confidence"],
             "primary_app": ctx.get("primary_app", ""),
             "primary_window": ctx.get("primary_window", ""),
+            "secondary_app": ctx.get("secondary_app", ""),
+            "secondary_window": ctx.get("secondary_window", ""),
             "browser_url": ctx.get("browser_url", ""),
+            "transition_count": ctx.get("transition_count", 0),
+            "frame_count": ctx.get("frame_count", 0),
         })
+
+    # Detect AFK/stale gaps — insert synthetic entries for 15-min slots with no data
+    if timeline:
+        filled = []
+        for i, t in enumerate(timeline):
+            if i > 0:
+                prev_end = timeline[i - 1]["end_time"]
+                cur_start = t["start_time"]
+                # If gap > 0 between blocks, insert AFK markers for each missing slot
+                pe = datetime.fromisoformat(prev_end.replace("Z", "+00:00"))
+                cs = datetime.fromisoformat(cur_start.replace("Z", "+00:00"))
+                gap_minutes = (cs - pe).total_seconds() / 60
+                if gap_minutes >= 15:
+                    slot = pe
+                    while slot < cs:
+                        slot_end = slot + timedelta(minutes=15)
+                        filled.append({
+                            "start_time": slot.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "end_time": slot_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "project_id": None,
+                            "name": "AFK / Away",
+                            "color": "#1a1a1a",
+                            "confidence": 0,
+                            "primary_app": "",
+                            "primary_window": "",
+                            "secondary_app": "",
+                            "secondary_window": "",
+                            "browser_url": "",
+                            "transition_count": 0,
+                            "frame_count": 0,
+                            "is_afk": True,
+                        })
+                        slot = slot_end
+            t["is_afk"] = False
+            # Mark as stale if same app with 0 transitions across this block
+            # (screen unchanged — user likely not at this machine)
+            if i > 0 and not timeline[i-1].get("is_afk"):
+                prev = timeline[i-1]
+                if (t["primary_app"] == prev.get("primary_app", "")
+                    and t["primary_window"] == prev.get("primary_window", "")
+                    and t["transition_count"] == 0
+                    and prev.get("transition_count", 0) == 0):
+                    t["is_stale"] = True
+                else:
+                    t["is_stale"] = False
+            else:
+                t["is_stale"] = False
+            filled.append(t)
+        timeline = filled
+
     return {"timeline": timeline}
+
+
+@dashboard_router.get("/api/activity/apps")
+def api_activity_apps(
+    machine_id: str = Query(...),
+    start: str = Query(...),
+    end: str = Query(...),
+    x_sync_token: str | None = Header(None),
+):
+    """Top apps per project — used in the breakdown section."""
+    _require_auth(x_sync_token)
+    db = _get_db()
+    rows = db.execute(
+        """SELECT c.project_id, p.name as project_name, p.color, c.context
+           FROM activity_classifications c
+           JOIN activity_projects p ON c.project_id = p.id
+           WHERE c.machine_id = ? AND c.start_time >= ? AND c.start_time <= ?
+           AND c.status = 'classified'""",
+        (machine_id, start, end),
+    ).fetchall()
+
+    # Aggregate app usage per project
+    from collections import Counter
+    project_apps: dict[int, dict] = {}
+    for r in rows:
+        pid = r["project_id"]
+        if pid not in project_apps:
+            project_apps[pid] = {"name": r["project_name"], "color": r["color"], "apps": Counter()}
+        ctx = {}
+        try:
+            ctx = json.loads(r["context"]) if r["context"] else {}
+        except (json.JSONDecodeError, TypeError):
+            pass
+        app = ctx.get("primary_app", "")
+        if app:
+            project_apps[pid]["apps"][app] += 1
+        sec = ctx.get("secondary_app", "")
+        if sec and sec != app:
+            project_apps[pid]["apps"][sec] += 0.5  # half weight for secondary
+
+    result = {}
+    for pid, data in project_apps.items():
+        top = data["apps"].most_common(5)
+        result[str(pid)] = {
+            "name": data["name"],
+            "color": data["color"],
+            "apps": [{"app": app, "blocks": round(count, 1)} for app, count in top],
+        }
+    return {"project_apps": result}
 
 
 @dashboard_router.get("/api/classify/status")
@@ -227,19 +330,29 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
   text-transform:uppercase; letter-spacing:1px; }
 .timeline { margin-bottom:32px; }
 .tl-row { display:flex; align-items:stretch; margin-bottom:2px; min-height:36px; }
+.tl-row.afk { opacity:0.35; }
+.tl-row.afk .tl-bar { background:repeating-linear-gradient(45deg, #333, #333 2px, transparent 2px, transparent 6px) !important; }
+.tl-row.stale { border-left:2px solid var(--amber); padding-left:4px; }
+.tl-row.stale .tl-label .stale-tag { background:var(--amber); color:#000; font-size:9px; font-weight:600;
+  padding:1px 5px; border-radius:4px; margin-left:6px; vertical-align:middle; }
 .tl-time { width:60px; font-size:11px; color:var(--dim); padding-top:8px; flex-shrink:0; }
 .tl-bar { width:6px; border-radius:3px; margin-right:12px; flex-shrink:0; }
-.tl-label { font-size:13px; padding:8px 0; }
+.tl-label { font-size:13px; padding:8px 0; flex:1; }
 .tl-label .app { color:var(--dim); font-size:11px; margin-left:8px; }
+.tl-label .sec-app { color:#555; font-size:10px; margin-left:4px; }
 .tl-label .confidence { color:var(--dim); font-size:10px; margin-left:8px; opacity:0.5; }
 
 /* Breakdown */
 .breakdown { margin-bottom:32px; }
-.br-row { display:flex; align-items:center; margin-bottom:12px; gap:12px; }
-.br-name { width:140px; font-size:13px; text-align:right; }
+.br-row { margin-bottom:16px; }
+.br-header { display:flex; align-items:center; gap:12px; }
+.br-name { width:140px; font-size:13px; text-align:right; flex-shrink:0; }
 .br-bar-wrap { flex:1; height:24px; background:var(--surface); border-radius:6px; overflow:hidden; }
 .br-bar { height:100%; border-radius:6px; transition:width 0.5s ease; }
-.br-stats { font-size:12px; color:var(--dim); width:120px; }
+.br-stats { font-size:12px; color:var(--dim); width:120px; flex-shrink:0; }
+.br-apps { margin-left:152px; margin-top:4px; display:flex; flex-wrap:wrap; gap:6px; }
+.br-app-tag { background:var(--surface); border:1px solid var(--border); color:var(--dim);
+  font-size:10px; padding:2px 8px; border-radius:4px; }
 
 /* Empty state */
 .empty { text-align:center; padding:60px 20px; color:var(--dim); }
@@ -374,9 +487,10 @@ async function refresh() {
   const qs = 'machine_id='+encodeURIComponent(mid)+'&start='+encodeURIComponent(start)+'&end='+encodeURIComponent(end);
 
   try {
-    const [summ, tl] = await Promise.all([
+    const [summ, tl, apps] = await Promise.all([
       api('/api/activity/summary?' + qs),
       api('/api/activity/timeline?' + qs),
+      api('/api/activity/apps?' + qs),
     ]);
 
     // Cards
@@ -399,28 +513,58 @@ async function refresh() {
         '<div class="pct">'+pct+'% &middot; '+s.block_count+' blocks</div></div>';
     }).join('');
 
-    // Timeline
+    // Timeline — with AFK gaps and stale detection
     const timeline = document.getElementById('timeline');
     timeline.innerHTML = tl.timeline.map(t => {
       const time = new Date(t.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      const isAfk = t.is_afk;
+      const isStale = t.is_stale;
+      const rowClass = isAfk ? 'tl-row afk' : isStale ? 'tl-row stale' : 'tl-row';
+
+      if (isAfk) {
+        return '<div class="'+rowClass+'">' +
+          '<div class="tl-time">'+time+'</div>' +
+          '<div class="tl-bar" style="background:#333"></div>' +
+          '<div class="tl-label" style="color:#555">AFK / Away</div></div>';
+      }
+
       const conf = t.confidence < 0.8 ? '<span class="confidence">'+Math.round(t.confidence*100)+'%</span>' : '';
-      const app = t.primary_app ? '<span class="app">'+esc(t.primary_app)+' — '+esc(t.primary_window).slice(0,40)+'</span>' : '';
-      return '<div class="tl-row">' +
+      const staleTag = isStale ? '<span class="stale-tag">STALE</span>' : '';
+      let appInfo = '';
+      if (t.primary_app) {
+        appInfo = '<span class="app">'+esc(t.primary_app);
+        if (t.primary_window) appInfo += ' — '+esc(t.primary_window).slice(0,40);
+        appInfo += '</span>';
+        if (t.secondary_app) {
+          appInfo += '<span class="sec-app">+ '+esc(t.secondary_app)+'</span>';
+        }
+      }
+      return '<div class="'+rowClass+'">' +
         '<div class="tl-time">'+time+'</div>' +
         '<div class="tl-bar" style="background:'+t.color+'"></div>' +
-        '<div class="tl-label">'+esc(t.name)+app+conf+'</div></div>';
+        '<div class="tl-label">'+esc(t.name)+appInfo+conf+staleTag+'</div></div>';
     }).join('');
 
-    // Breakdown
+    // Breakdown with apps per project
     const maxSec = summ.summary.length > 0 ? summ.summary[0].total_seconds : 1;
+    const pa = apps.project_apps || {};
     const breakdown = document.getElementById('breakdown');
     breakdown.innerHTML = summ.summary.map(s => {
       const pct = total > 0 ? Math.round(s.total_seconds / total * 100) : 0;
       const width = Math.round(s.total_seconds / maxSec * 100);
+      const projApps = pa[String(s.project_id)];
+      let appTags = '';
+      if (projApps && projApps.apps.length > 0) {
+        appTags = '<div class="br-apps">' +
+          projApps.apps.map(a => '<span class="br-app-tag">'+esc(a.app)+' ('+a.blocks+')</span>').join('') +
+          '</div>';
+      }
       return '<div class="br-row">' +
+        '<div class="br-header">' +
         '<div class="br-name">'+esc(s.name)+'</div>' +
         '<div class="br-bar-wrap"><div class="br-bar" style="width:'+width+'%;background:'+s.color+'"></div></div>' +
-        '<div class="br-stats">'+pct+'% &middot; '+fmt(s.total_seconds)+'</div></div>';
+        '<div class="br-stats">'+pct+'% &middot; '+fmt(s.total_seconds)+'</div>' +
+        '</div>' + appTags + '</div>';
     }).join('');
 
   } catch(e) { console.error('refresh error', e); }
