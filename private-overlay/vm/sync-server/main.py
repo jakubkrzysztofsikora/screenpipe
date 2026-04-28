@@ -35,6 +35,11 @@ MCP_BASE_URL = os.environ.get("MCP_BASE_URL", "http://localhost:8765").rstrip("/
 # Scaleway serverless Ollama (optional — classifier disabled if blank)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "")
 SCW_OLLAMA_TOKEN = os.environ.get("SCW_OLLAMA_TOKEN", "")
+# Axiom heartbeat (optional — publisher disabled if blank).
+# AXIOM_URL is the edge deployment base domain (e.g. eu-central-1.aws.edge.axiom.co).
+AXIOM_TOKEN = os.environ.get("AXIOM_TOKEN", "")
+AXIOM_DATASET = os.environ.get("AXIOM_DATASET", "screenpipe-heartbeat")
+AXIOM_URL = os.environ.get("AXIOM_URL", "https://eu-central-1.aws.edge.axiom.co")
 
 # ── Constants ────────────────────────────────────────────────────
 ALLOWED_TABLES = frozenset({
@@ -211,13 +216,30 @@ async def _lifespan(application: FastAPI):
         else:
             log.info("OLLAMA_URL not set — classifier disabled")
 
+        # Start heartbeat publisher if Axiom is configured
+        heartbeat_task = None
+        if AXIOM_TOKEN:
+            from heartbeat_publisher import HeartbeatPublisher
+            publisher = HeartbeatPublisher(
+                db_path=DB_PATH,
+                axiom_token=AXIOM_TOKEN,
+                axiom_dataset=AXIOM_DATASET,
+                axiom_url=AXIOM_URL,
+            )
+            heartbeat_task = asyncio.create_task(publisher.run())
+            log.info("Heartbeat publisher enabled: dataset=%s", AXIOM_DATASET)
+        else:
+            log.info("AXIOM_TOKEN not set — heartbeat publisher disabled")
+
         try:
             yield
         finally:
-            if classifier_task:
-                classifier_task.cancel()
+            for t in (classifier_task, heartbeat_task):
+                if t is None:
+                    continue
+                t.cancel()
                 try:
-                    await classifier_task
+                    await t
                 except asyncio.CancelledError:
                     pass
 

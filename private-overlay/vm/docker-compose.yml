@@ -19,6 +19,11 @@ services:
       # Scaleway serverless Ollama (optional — classifier disabled if blank)
       - OLLAMA_URL=${OLLAMA_URL:-}
       - SCW_OLLAMA_TOKEN=${SCW_OLLAMA_TOKEN:-}
+      # Axiom heartbeat publisher (optional — disabled if blank).
+      # AXIOM_URL is the edge deployment base domain (eu-central-1.aws.edge.axiom.co for EU).
+      - AXIOM_TOKEN=${AXIOM_TOKEN:-}
+      - AXIOM_DATASET=${AXIOM_DATASET:-screenpipe-heartbeat}
+      - AXIOM_URL=${AXIOM_URL:-https://eu-central-1.aws.edge.axiom.co}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
